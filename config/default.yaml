@@ -12,25 +12,25 @@ debug    :
 #   backward method: fuse (direct training DT)
 #   backward method: detect (task-oriented training TT)
 #   backward method: fuse & detect (cooperative training CT)
-strategy : fuse & detect
+strategy : fuse # fuse & detect 数据集使用TNO，策略改成仅fuse
 
 # fuse network settings: core of infrared and visible fusion
 fuse     :
-  dim       : 32 # features base dimensions for generator and discriminator
-  depth     : 3 # depth of dense architecture
-  pretrained: weights/v1/tardal-dt.pth # ~: disable, path or url: load with pretrained parameters
+  dim       : 32 # features base dimensions for generator and discriminator 特征基础维度（如32表示卷积层初始通道数）
+  depth     : 3 # depth of dense architecture 密集连接层数（影响网络复杂度）
+  pretrained: weights/v1/tardal-dt.pth # ~: disable, path or url: load with pretrained parameters 预训练权重路径（代码中自动处理未指定时的默认下载）
 
 # detect network settings: available if framework in joint mode (detect, fuse + detect)
 detect   :
   model     : yolov5s # yolo model (yolov5 n,s,m,l,x)
-  channels  : 3 # input channels (3: rgb or 1: grayscale)
-  pretrained: weights/v1/tardal-dt.pth # ~: disable, path or url: load with pretrained parameters
+  channels  : 3 # input channels (3: rgb or 1: grayscale) 输入通道数（3对应融合后的RGB图像）
+  pretrained: weights/v1/tardal-dt.pth # ~: disable, path or url: load with pretrained parameters 联合训练时的检测权重
 
-# saliency network settings: generating mask for training tardal
+# 显著性网络saliency network settings: generating mask for training tardal
 saliency :
   url: https://github.com/JinyuanLiu-CV/TarDAL/releases/download/v1.0.0/mask-u2.pth
 
-# iqa settings: information measurement
+# IQA（图像质量评估）iqa settings: information measurement
 iqa      :
   url: https://github.com/JinyuanLiu-CV/TarDAL/releases/download/v1.0.0/iqa-vgg.pth
 
@@ -38,8 +38,8 @@ iqa      :
 #   we provide four built-in representative datasets,
 #   if you want to use some custom datasets, please refer to the documentation to write yourself or open an issue.
 dataset  :
-  name  : M3FD # dataset folder to be trained with (fuse: TNO, RoadScene; fuse & detect: M3FD, MultiSpectral, etc.)
-  root  : data/m3fd # dataset root path
+  name  : TNO # dataset folder to be trained with (fuse: TNO, RoadScene; fuse & detect: M3FD, MultiSpectral, etc.)
+  root  : data/tno # dataset root path
   # only available for fuse & detect
   detect:
     hsv        : [ 0.015,0.7,0.4 ] # image HSV augmentation (fraction) [developing]
@@ -96,7 +96,7 @@ loss     :
     detect: 0.5 # detect loss gain for generator
     warm  : 2 # bridge warm up epochs (det -> det, fuse -> fuse)
 
-# optimizer settings:
+# 优化器optimizer settings:
 optimizer:
   name        : sgd # optimizer name
   lr_i        : 1.0e-2 # initial learning rate
@@ -105,7 +105,7 @@ optimizer:
   weight_decay: 5.0e-4 # decay rate used in optimizer
   lr_d        : 1.0e-4 # discriminator learning rate
 
-# scheduler settings:
+# 学习率调度器scheduler settings:
 scheduler:
   warmup_epochs  : [ 2.0, 3.0 ] # start-[0]: bridge warm (keep const), [0]-[1]: normal warm, [1]-end: normal decay
   warmup_momentum: 0.8 # warmup initial momentum

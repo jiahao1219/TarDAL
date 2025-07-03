@@ -16,7 +16,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # init config
-    config = yaml.safe_load(Path(args.cfg).open('r'))
+    config = yaml.safe_load(Path(args.cfg).open('r', encoding='utf-8'))
     config = from_dict(config)  # convert dict to object
     config = config
 

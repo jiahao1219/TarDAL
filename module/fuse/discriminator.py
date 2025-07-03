@@ -23,8 +23,9 @@ class Discriminator(nn.Module):
                 nn.LeakyReLU(0.2, True),
             ),
         )
-
+        # 展平
         self.flatten = nn.Flatten()
+        # 全连接层
         self.linear = nn.Linear((size[0] // 8) * (size[1] // 8) * 4 * dim, 1)
 
     def forward(self, x: Tensor) -> Tensor:
