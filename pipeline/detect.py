@@ -14,7 +14,7 @@ from torchvision.utils import draw_bounding_boxes
 from functions.get_param_groups import get_param_groups
 from module.detect.models.common import Conv
 from module.detect.models.yolo import Model
-from module.detect.utils.general import labels_to_class_weights, non_max_suppression
+from module.detect.utils.general import labels_to_class_weights, non_max_suppression, LOGGER
 from module.detect.utils.loss import ComputeLoss
 from module.detect.utils.metrics import box_iou
 
@@ -70,7 +70,8 @@ class Detect:
                     logging.fatal(f'connect to {url} failed: {err}, try download pretrained weights manually')
                     sys.exit(1)
             else:
-                ckpt = torch.load(d_ckpt, map_location='cpu')
+                #  解除 PyTorch 2.6 的安全限制（默认启用 weights_only=True 防止恶意代码执行 禁止加载包含非内置类的模型）
+                ckpt = torch.load(d_ckpt, map_location='cpu', weights_only=False)
             self.load_ckpt(ckpt)
 
         # criterion (reference: YOLOv5 official)
