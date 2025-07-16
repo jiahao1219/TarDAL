@@ -35,7 +35,7 @@ class Fuse:
 
         # init tardal generator
         f_dim, f_depth = config.fuse.dim, config.fuse.depth
-        generator = Generator(dim=f_dim, depth=f_depth)
+        generator = Generator(input_channels=2, output_channels=1, dim=f_dim, depth=f_depth)
         modules.append(generator)
         logging.info(f'init generator with (dim: {f_dim} depth: {f_depth})')
         self.generator = generator
