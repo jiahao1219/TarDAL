@@ -13,6 +13,8 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
 import loader
 from config import from_dict, ConfigDict
 from pipeline.fuse import Fuse
@@ -82,8 +84,19 @@ class TrainF:
         self.optimizer.add_param_group(groups[1])
 
         # init scheduler
-        lr_fn = lambda x: (1 - x / config.train.epochs) * (1 - o_cfg.lr_f) + o_cfg.lr_f
-        self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_fn)
+        # lr_fn = lambda x: (1 - x / config.train.epochs) * (1 - o_cfg.lr_f) + o_cfg.lr_f
+        # self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_fn)
+        # === 修改：初始化 ReduceLROnPlateau 调度器 ===
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',  # 监控指标越小越好
+            factor=0.5,  # 学习率衰减因子
+            patience=5,  # 多少个epoch无改善后衰减
+            min_lr=o_cfg.lr_f,  # 最小学习率
+            threshold=0.0001,  # 改善阈值
+            threshold_mode='rel',  # 相对改善
+            cooldown=3,  # 衰减后的冷却期
+        )
 
         # init dataset & dataloader
         data_t = getattr(loader, config.dataset.name)  # dataset type
@@ -103,8 +116,38 @@ class TrainF:
         epochs = self.config.train.epochs
         e_interval = self.config.train.eval_interval
         s_interval = self.config.train.save_interval
+        # 新增：梯度监控
+        grad_norms = []
+
+        # 新增：预训练配置，添加分阶段训练（冻结判别器）
+        pretrain_epochs = 100  # 前100轮冻结判别器
+        current_adv_weight = 0.0  # 对抗损失权重
+
         # start training process
         for epoch in range(1, epochs + 1):
+            # === 新增：初始化损失累加器 ===
+            total_g_loss = 0.0
+            step_count = 0
+            # 新增：判别器冻结/解冻逻辑
+            if epoch <= pretrain_epochs:
+                # 预训练阶段：冻结判别器
+                self.fuse.dis_t.eval()
+                self.fuse.dis_d.eval()
+                for param in self.fuse.dis_t.parameters():
+                    param.requires_grad = False
+                for param in self.fuse.dis_d.parameters():
+                    param.requires_grad = False
+                current_adv_weight = 0.0  # 禁用对抗损失
+            else:
+                # 联合训练阶段：解冻判别器
+                self.fuse.dis_t.train()
+                self.fuse.dis_d.train()
+                for param in self.fuse.dis_t.parameters():
+                    param.requires_grad = True
+                for param in self.fuse.dis_d.parameters():
+                    param.requires_grad = True
+                current_adv_weight = self.config.loss.fuse.adv  # 使用配置权重
+
             # train
             t_l = tqdm(self.t_loader, disable=False, total=len(self.t_loader) if not self.config.debug.fast_run else 3, ncols=120)
             g_history = [AverageMeter() for _ in range(5)]  # tot, src, adv, tar, det
@@ -113,29 +156,46 @@ class TrainF:
             for sample in t_l:
                 sample = dict_to_device(sample, self.fuse.device)
                 # train generator
+                # g_loss, [src_l, adv_l, tar_l, det_l] = self.fuse.criterion_generator(
+                #     ir=sample['ir'], vi=sample['vi'],
+                #     mk=sample['mask'],
+                #     w1=sample['ir_w'], w2=sample['vi_w'],
+                #     d_warming=epoch <= self.config.loss.fuse.d_warm,
+                # )
+                # 修改生成器损失调用（传递对抗权重）
                 g_loss, [src_l, adv_l, tar_l, det_l] = self.fuse.criterion_generator(
-                    ir=sample['ir'], vi=sample['vi'],
-                    mk=sample['mask'],
+                    ir=sample['ir'], vi=sample['vi'], mk=sample['mask'],
                     w1=sample['ir_w'], w2=sample['vi_w'],
                     d_warming=epoch <= self.config.loss.fuse.d_warm,
+                    current_adv_weight=current_adv_weight  # 新增参数
                 )
+
                 g_history[0].update(g_loss.item())
                 _ = [g_history[idx + 1].update(v) for idx, v in enumerate([src_l, adv_l, tar_l, det_l])]
                 self.optim(g_loss)
+
+                # === 新增：累加生成器损失 ===
+                total_g_loss += g_loss.item()
+                step_count += 1
+
                 # train target discriminator
                 d_t_loss = self.fuse.criterion_dis_t(
                     ir=sample['ir'], vi=sample['vi'],
                     mk=sample['mask'],
                 )
                 disc_history[0].update(d_t_loss.item())
-                self.optim(d_t_loss)
+                # self.optim(d_t_loss)
+                self.optim(d_t_loss, discriminator=True)  # 添加判别器标识
                 # train detail discriminator
                 d_d_loss = self.fuse.criterion_dis_d(
                     ir=sample['ir'], vi=sample['vi'],
                     mk=sample['mask'],
                 )
                 disc_history[1].update(d_d_loss.item())
-                self.optim(d_d_loss)
+                # self.optim(d_d_loss)
+                self.optim(d_d_loss, discriminator=True)  # 添加判别器标识
+
+
                 # fast run (jump out)
                 if self.config.debug.fast_run and t_l.n > 2:
                     logging.info('fast mode: jump')
@@ -156,7 +216,13 @@ class TrainF:
                     break
             # update scheduler and show lr
             log_dict |= reduce(lambda x, y: x | y, [{f'lr_{i}': v['lr']} for i, v in enumerate(self.optimizer.param_groups)])
-            self.scheduler.step()
+
+            # === 新增：计算平均生成器损失 ===
+            avg_g_loss = total_g_loss / step_count if step_count > 0 else 0
+
+            # === 修改：更新学习率调度器 ===
+            # 使用平均生成器损失作为指标
+            self.scheduler.step(avg_g_loss)
 
             # update wandb
             self.runs.log(log_dict)
@@ -166,9 +232,27 @@ class TrainF:
                 torch.save(ckpt, self.save_dir / f'{str(epoch).zfill(5)}.pth')
                 logging.info(f'Epoch {epoch}/{epochs} | Model Saved')
 
-    def optim(self, loss: Tensor):
+    # def optim(self, loss: Tensor):
+    #     self.optimizer.zero_grad()
+    #     loss.backward()
+    #     self.optimizer.step()
+
+    def optim(self, loss: Tensor, discriminator: bool = False):
+        """
+        添加梯度裁剪
+        """
         self.optimizer.zero_grad()
         loss.backward()
+
+        # 梯度裁剪
+        if discriminator:
+            # 判别器梯度裁剪
+            params = list(self.fuse.dis_t.parameters()) + list(self.fuse.dis_d.parameters())
+            torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
+        else:
+            # 生成器梯度裁剪
+            torch.nn.utils.clip_grad_norm_(self.fuse.generator.parameters(), max_norm=1.0)
+
         self.optimizer.step()
 
 

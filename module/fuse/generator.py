@@ -16,14 +16,20 @@ class Generator(nn.Module):
         for i in range(depth):
             in_ch = input_channels if i == 0 else dim * (2 ** (i - 1))
             out_ch = dim * (2 ** i)
-            self.encoders.append(self._conv_block(in_ch, out_ch))
+            self.encoders.append(nn.Sequential(
+                self._conv_block(in_ch, out_ch),
+                nn.Dropout(p=0.2)  # 添加Dropout防止过拟合
+            ))
 
         # 解码器上采样块（按深层到浅层顺序定义：2→1→0）
         self.decoders = nn.ModuleList()
         for i in range(depth - 2, -1, -1):
             in_ch = dim * (2 ** (i + 1))  # 输入：上一层解码器输出通道
             out_ch = dim * (2 ** i)  # 输出：当前解码器通道
-            self.decoders.append(self._up_conv_block(in_ch, out_ch))
+            self.decoders.append(nn.Sequential(
+                nn.Dropout(p=0.2),  # 添加Dropout
+                self._up_conv_block(in_ch, out_ch)
+            ))
 
         # 密集连接融合块（按深层到浅层顺序定义：2→1→0）
         self.dense_blocks = nn.ModuleList()
@@ -31,7 +37,10 @@ class Generator(nn.Module):
             in_ch = dim * (2 ** i)  # 基础通道：解码器输出通道
             for j in range(i + 1, depth):  # 添加深层编码器特征通道
                 in_ch += dim * (2 ** j)
-            self.dense_blocks.append(self._conv_block(in_ch, dim * (2 ** i)))
+            self.dense_blocks.append(nn.Sequential(
+                self._conv_block(in_ch, dim * (2 ** i)),
+                nn.Dropout(p=0.2)  # 添加Dropout
+            ))
 
         # 输出层
         self.out_conv = nn.Conv2d(dim, output_channels, kernel_size=1)

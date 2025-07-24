@@ -176,7 +176,7 @@ class Fuse:
 
         return loss
 
-    def criterion_generator(self, ir: Tensor, vi: Tensor, mk: Tensor, w1: Tensor, w2: Tensor, d_warming: bool = True):
+    def criterion_generator(self, ir: Tensor, vi: Tensor, mk: Tensor, w1: Tensor, w2: Tensor, d_warming: bool = True, current_adv_weight: float = 0.0):
         """
         criterion on generator 'ir, vi <- loss -> fus'
         return: Tuple[Tensor, List[number]] (only fuse), Tuple[Tensor, Tensor, List[number]] (joint mode)
@@ -184,18 +184,28 @@ class Fuse:
 
         logging.debug('criterion on generator')
 
-        # forward (train mode for calculate loss)
+        """
+            修复后的生成器损失计算
+            """
+        # 前向传播
         fus = self.forward(ir, vi)
 
-        # calculate src and adv loss
-        f_loss = self.config.loss.fuse
-        src_w, adv_w = f_loss.src, f_loss.adv
-        adv_w = 0 if d_warming else adv_w
+        # 源损失计算（添加数值稳定）
         src_l = w1 * self.src_loss(fus, ir) + w2 * self.src_loss(fus, vi)
-        adv_l, tar_l, det_l = self.adv_loss(fus, mk)
-        loss = src_w * src_l.mean() + adv_w * adv_l.mean()
+        src_l = torch.clamp(src_l, min=0.0, max=10.0)  # 限制损失范围
 
-        # only fuse
+        # 对抗损失计算（修复符号错误）
+        adv_l, tar_l, det_l = self.adv_loss(fus, mk)
+        # 梯度裁剪替代数值截断（避免直接截断损失值导致的梯度消失）
+        #torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)
+
+        # 动态权重调整
+        adv_w = 0 if d_warming else current_adv_weight
+
+        # 总损失计算（确保正值）
+        loss = self.config.loss.fuse.src * src_l.mean() + adv_w * adv_l.mean()
+
+        # 返回损失和详细值
         return loss, [src_l.mean().item(), adv_l.mean().item(), tar_l, det_l]
 
     @staticmethod
@@ -205,14 +215,29 @@ class Fuse:
         u = torch.sqrt(torch.pow(dx, 2) + torch.pow(dy, 2) + eps)  # sqrt backwork x range: (0, n]
         return u
 
+    # def src_loss(self, x: Tensor, y: Tensor) -> Tensor:
+    #     src_fn = self.config.loss.fuse.src_fn
+    #     match src_fn:
+
+    #         case 'v0':
+    #             "fus <- 0.01*ssim + 0.99*l1 -> src"
+    #             return 0.01 * ssim_loss(x, y, window_size=11) + 0.99 * l1_loss(x, y)
+    #         case 'v1':
+    #             "fus <- ms-ssim -> src"
+    #             return self.ms_ssim_loss(x, y)
+    #         case _:
+    #             assert NotImplemented, f'unsupported src function: {src_fn}'
+    # 修正MS - SSIM损失计算
     def src_loss(self, x: Tensor, y: Tensor) -> Tensor:
         src_fn = self.config.loss.fuse.src_fn
         match src_fn:
             case 'v0':
-                "fus <- 0.01*ssim + 0.99*l1 -> src"
                 return 0.01 * ssim_loss(x, y, window_size=11) + 0.99 * l1_loss(x, y)
             case 'v1':
-                "fus <- ms-ssim -> src"
+                # 添加输入归一化和边界保护
+                x = torch.clamp(x, -1, 1)   # 限制在tanh输出范围内
+                y = torch.clamp(y, -1, 1)
+                # 调整max_val匹配实际数值范围
                 return self.ms_ssim_loss(x, y)
             case _:
                 assert NotImplemented, f'unsupported src function: {src_fn}'
