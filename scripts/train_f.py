@@ -116,8 +116,6 @@ class TrainF:
         epochs = self.config.train.epochs
         e_interval = self.config.train.eval_interval
         s_interval = self.config.train.save_interval
-        # 新增：梯度监控
-        grad_norms = []
 
         # 新增：预训练配置，添加分阶段训练（冻结判别器）
         pretrain_epochs = 100  # 前100轮冻结判别器
@@ -153,6 +151,8 @@ class TrainF:
             g_history = [AverageMeter() for _ in range(5)]  # tot, src, adv, tar, det
             disc_history = AverageMeter(), AverageMeter()  # target, detail
             log_dict = {}
+            # 新增：梯度监控
+            grad_norms = []
             for sample in t_l:
                 sample = dict_to_device(sample, self.fuse.device)
                 # train generator
@@ -200,6 +200,14 @@ class TrainF:
                 if self.config.debug.fast_run and t_l.n > 2:
                     logging.info('fast mode: jump')
                     break
+                # 梯度监控
+                total_norm = 0
+                for p in self.fuse.generator.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                grad_norms.append(total_norm ** 0.5)
+                self.runs.log({"grad_norm": grad_norms[-1]})
             # train logs
             g_l, src_l, adv_l, tar_l, det_l = [g_history[i].avg for i in range(5)]
             d_t_l, d_d_l = disc_history[0].avg, disc_history[1].avg
@@ -244,14 +252,14 @@ class TrainF:
         self.optimizer.zero_grad()
         loss.backward()
 
-        # 梯度裁剪
+        # 动态梯度裁剪阈值（核心改进）
+        max_norm = max(1.0, 0.01 * abs(loss.item()))  # 随损失动态调整
+
         if discriminator:
-            # 判别器梯度裁剪
             params = list(self.fuse.dis_t.parameters()) + list(self.fuse.dis_d.parameters())
-            torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(params, max_norm=max_norm)
         else:
-            # 生成器梯度裁剪
-            torch.nn.utils.clip_grad_norm_(self.fuse.generator.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.fuse.generator.parameters(), max_norm=max_norm)
 
         self.optimizer.step()
 
