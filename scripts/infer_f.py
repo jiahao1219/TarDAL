@@ -11,6 +11,7 @@ import loader
 from config import ConfigDict, from_dict
 from pipeline.fuse import Fuse
 from tools.dict_to_device import dict_to_device
+import torch.nn as nn
 
 
 class InferF:
@@ -60,6 +61,22 @@ class InferF:
             fus = self.fuse.inference(ir=sample['ir'], vi=sample['vi'])
             # recolor
             if self.data_t.color and self.config.inference.grayscale is False:
+                #fus = torch.cat([fus, sample['cbcr']], dim=1)
+                # 1. 获取原始CbCr通道的尺寸（H×W）
+                cbcr_h, cbcr_w = sample['cbcr'].shape[2], sample['cbcr'].shape[3]
+                # 2. 获取融合图像当前尺寸
+                fus_h, fus_w = fus.shape[2], fus.shape[3]
+
+                # 3. 若尺寸不匹配，将fus下采样到CbCr的原始尺寸（保持与原始图像一致）
+                if fus_h != cbcr_h or fus_w != cbcr_w:
+                    # 使用bilinear插值下采样，align_corners确保边角像素对齐
+                    fus = nn.Upsample(
+                        size=(cbcr_h, cbcr_w),
+                        mode='bilinear',
+                        align_corners=True
+                    )(fus)
+
+                # 4. 现在尺寸匹配，执行拼接（dim=1：通道维度拼接，fus是1通道，CbCr是2通道，最终3通道RGB）
                 fus = torch.cat([fus, sample['cbcr']], dim=1)
                 fus = ycbcr_to_rgb(fus)
             # save images

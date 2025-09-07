@@ -64,24 +64,43 @@ class TrainF:
 
         # init optimizer
         o_cfg = config.optimizer
-        fuse_pg = fuse.param_groups()  # [weight(with decay), weight(no decay), bias]
+
+        # 1. 生成器参数（所有需要训练的参数）
+        generator_params = [p for p in self.fuse.generator.parameters() if p.requires_grad]
+
+        # 2. 判别器参数（目标判别器+细节判别器）
+        discriminator_params = []
+        discriminator_params.extend([p for p in self.fuse.dis_t.parameters() if p.requires_grad])
+        discriminator_params.extend([p for p in self.fuse.dis_d.parameters() if p.requires_grad])
+
+        # 确保生成器和判别器参数无重叠
+        gen_ids = {id(p) for p in generator_params}
+        dis_ids = {id(p) for p in discriminator_params}
+        assert gen_ids.isdisjoint(dis_ids), "生成器和判别器参数存在重叠！"
+
+        # 定义参数组（仅分两组：生成器+判别器）
         groups = [
-            {'params': fuse_pg[0], 'lr': o_cfg.lr_i, 'weight_decay': o_cfg.weight_decay},
-            {'params': fuse_pg[1], 'lr': o_cfg.lr_i, 'weight_decay': 0},
+            # 生成器参数（基础学习率）
+            {'params': generator_params, 'lr': o_cfg.lr_i, 'weight_decay': o_cfg.weight_decay},
+            # 判别器参数（学习率为生成器的2倍，加速对抗训练）
+            {'params': discriminator_params, 'lr': o_cfg.lr_i * 2, 'weight_decay': o_cfg.weight_decay / 10}
         ]
+
+        # 初始化优化器
+        # 初始化优化器（修复参数组重复）
         match o_cfg.name:
             case 'sgd':
-                optimizer = SGD(fuse_pg[2], lr=o_cfg.lr_i, momentum=o_cfg.momentum, nesterov=True)
+                # 直接将groups传入优化器，无需后续add_param_group
+                self.optimizer = SGD(groups, momentum=o_cfg.momentum, nesterov=True)
             case 'adam':
-                optimizer = Adam(fuse_pg[2], lr=o_cfg.lr_i, betas=(o_cfg.momentum, 0.999))
+                self.optimizer = Adam(groups, betas=(o_cfg.momentum, 0.999))
             case 'adamw':
-                optimizer = AdamW(fuse_pg[2], lr=o_cfg.lr_i, betas=(o_cfg.momentum, 0.999), weight_decay=0)
+                self.optimizer = AdamW(groups, betas=(o_cfg.momentum, 0.999))
             case _:
-                optimizer = None
-                assert NotImplemented, f'unsupported optimizer: {o_cfg.name}'
-        self.optimizer = optimizer
-        self.optimizer.add_param_group(groups[0])
-        self.optimizer.add_param_group(groups[1])
+                assert NotImplemented, f'不支持的优化器: {o_cfg.name}'
+
+        # self.optimizer.add_param_group(groups[0])
+        # self.optimizer.add_param_group(groups[1])
 
         # init scheduler
         # lr_fn = lambda x: (1 - x / config.train.epochs) * (1 - o_cfg.lr_f) + o_cfg.lr_f
@@ -155,6 +174,9 @@ class TrainF:
             grad_norms = []
             for sample in t_l:
                 sample = dict_to_device(sample, self.fuse.device)
+                # 额外验证
+                assert sample['ir'].device.type == 'cuda', "红外图像未移至CUDA"
+                assert sample['vi'].device.type == 'cuda', "可见光图像未移至CUDA"
                 # train generator
                 # g_loss, [src_l, adv_l, tar_l, det_l] = self.fuse.criterion_generator(
                 #     ir=sample['ir'], vi=sample['vi'],
@@ -214,13 +236,17 @@ class TrainF:
             log_dict |= {'g/tot': g_l, 'g/src': src_l, 'g/adv': adv_l, 'g/tar': d_t_l, 'g/det': d_d_l, 'disc/tar': tar_l, 'disc/det': det_l}
             logging.info(f'Epoch {epoch}/{epochs} | Generator Loss: {g_l:.4f} | Source Loss: {src_l:.4f} | Adversarial Loss: {adv_l:.4f}')
 
-            # eval (fuse: show in wandb)
-            if epoch % e_interval == 0 or self.config.debug.fast_run:
+            # 图片日志由 save_interval (s_interval) 控制，与模型保存同步
+            if epoch % s_interval == 0 or self.config.debug.fast_run:  # 关键修改：e_interval → s_interval
                 e_l = tqdm(self.v_loader, disable=True)
                 for sample in e_l:
                     sample = dict_to_device(sample, self.fuse.device)
                     fus = self.fuse.eval(ir=sample['ir'], vi=sample['vi'])
-                    log_dict |= {'fuse': wandb.Image(fus), 'mask': wandb.Image(sample['mask'])}
+                    # 建议给图片日志添加明确名称，避免与其他日志混淆
+                    log_dict |= {
+                        'fuse/saved': wandb.Image(fus, caption=f'Epoch {epoch}'),
+                        'mask/saved': wandb.Image(sample['mask'], caption=f'Epoch {epoch}')
+                    }
                     break
             # update scheduler and show lr
             log_dict |= reduce(lambda x, y: x | y, [{f'lr_{i}': v['lr']} for i, v in enumerate(self.optimizer.param_groups)])
